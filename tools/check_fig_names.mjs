@@ -114,13 +114,25 @@ function collectLiterals(src) {
   const out = [];
   const lineOf = (idx) => src.slice(0, idx).split(/\r?\n/).length;
   // 只认"长得像图名"的字面量：以 <阶段>- 开头
+  // **拼接前缀跳过**（scrna 门的 R 版双语适配同步，2026-09-26）：
+  // `TF_FIG_BASE <- "01-06-01-unit"` 这类以 `-unit` 结尾、没有 slug 的
+  // 字面量是**运行时拼接的前缀**（DYNAMIC_FIG_BASES 的配套物），不是
+  // 完整图名 —— NAME_RE 必然拒绝它。跳过让动态账目走 DYNAMIC_FIG_BASES
+  // 声明豁免，而不是逼人把前缀藏进绕过式写法。
   const re = new RegExp(`"(${PART}-[^"]*)"`, "g");
   let m;
   while ((m = re.exec(src)) !== null) {
+    if (/-unit$/.test(m[1])) continue;
     out.push({ name: m[1].replace(/\.(pdf|png)$/i, ""), line: lineOf(m.index) });
   }
   return out;
 }
+
+// **sprintf 占位符模板不是图名**（R 版脚本双语适配，与 scrna 门的 f-string 跳过同逻辑）：
+// `sprintf("01-06-04-unit%d-%s", i, g)` 里的 `"01-06-04-unit%d-%s"` 会被上面的
+// 正则当字面量收进来，随后 NAME_RE 判"unit 后不是数字"报假阳性。模板本身
+// 不参与合规判定，动态豁免走 DYNAMIC_FIG_BASES_DECL。
+const SPRINTF_TPL = /%(\d+\$)?[-#0 +]*\d*(?:\.\d+)?[dioxXufeEgGcs]/;
 
 /** 数出图调用点，并取出每个调用写的名字（实参不是字面量时是 null）。 */
 function collectCalls(src) {
@@ -222,13 +234,17 @@ for (const f of scripts) {
     byName.set(item.name, item.line);
     figs.push({ fig: Number(m[2]), unit: Number(m[3]), name: item.name, line: item.line });
 
-    // **跨脚本重名才算问题**（同一脚本内重复是记账引用）
-    if (seen.has(item.name)) {
+    // **跨脚本重名才算问题**（同一脚本内重复是记账引用）。
+    // **语言分域**：仓库同时含 `.py` 与 `.R` 时（两版并存，同名图是设计目标），
+    // 重名判定按语言分域 —— `seen` 的键是 `<lang>:<name>`。
+    const lang = f.endsWith(".R") ? "r" : "py";
+    const seenKey = `${lang}:${item.name}`;
+    if (seen.has(seenKey)) {
       problems.push(
-        `${f}:${item.line} 名字 "${item.name}" 与 ${seen.get(item.name)} 重复 —— 两个脚本写同一个文件`
+        `${f}:${item.line} 名字 "${item.name}" 与 ${seen.get(seenKey)} 重复 —— 两个脚本写同一个文件`
       );
     } else {
-      seen.set(item.name, `${f}:${item.line}`);
+      seen.set(seenKey, `${f}:${item.line}`);
     }
   }
 
@@ -246,7 +262,16 @@ for (const f of scripts) {
   // DYNAMIC_FIG_BASES_DECL = '<figNo>:<count>' 声明某图号下有 N 张运行时命名的单图。
   // R 侧用字符串形式（R 没有 JS 对象字面量），所以解析写法与 Python 侧不同。
   let dynTotal = 0;
+  // geo 的声明式：DYNAMIC_FIG_BASES_DECL = 'NN:NN,...'（R 无 JS 对象字面量）
   const dynDecl = src.match(/DYNAMIC_FIG_BASES_DECL\s*=\s*'([^']*)'/g) || [];
+  // R 版对象式：DYNAMIC_FIG_BASES <- list("03" = 8L)（与 Python 的
+  // DYNAMIC_FIG_BASES = {"03": 8} 语义相同；scrna R 版脚本用这种）
+  const dynObj = [...src.matchAll(/DYNAMIC_FIG_BASES\s*<-\s*list\(([^)]*)\)/g)];
+  for (const d of dynObj) {
+    for (const kv of d[1].matchAll(/"(\d{2})"\s*=\s*(\d+)/g)) {
+      dynTotal += Number(kv[2]);
+    }
+  }
   for (const d of dynDecl) {
     const m = d.match(/'([^']*)'/);
     if (!m) continue;
@@ -283,6 +308,11 @@ for (const f of scripts) {
   // 图其实出了，只是名字是拼的。
   // 反过来，若某图号既没有字面量、也没被声明，那才是真的缺号。
   const dynFigNos = new Set();
+  for (const d of dynObj) {
+    for (const kv of d[1].matchAll(/"(\d{2})"\s*=\s*(\d+)/g)) {
+      dynFigNos.add(Number(kv[1]));
+    }
+  }
   for (const d of dynDecl) {
     const m = d.match(/'([^']*)'/);
     if (!m) continue;
@@ -310,7 +340,7 @@ for (const f of scripts) {
 }
 
 console.log(`检查 ${repoName}（阶段 ${PART}）`);
-console.log(`  ${scripts.length} 个脚本，${nCallsTotal} 处出图调用，${seen.size} 个唯一图名`);
+console.log(`  ${scripts.length} 个脚本，${nCallsTotal} 处出图调用，${seen.size} 个唯一图名（按语言分域）`);
 const multi = [...seen.keys()].filter((n) => /-unit[2-9]/.test(n));
 console.log(`  多单元图：${multi.length ? multi.join(", ") : "（无）"}`);
 if (notes.length) {
