@@ -1,19 +1,35 @@
-# 运行产物
-# **前导 **/ 递归匹配** —— 只写 `data/` 不覆盖子目录下的 `data/`
-# （scrna 侧实测漏了一个 24 MB 缓存 h5ad，2026-09-25 打包时发现）
-**/results/
+# 数据与产物
 **/data/
+**/results/
+**/figures/
+**/outputs/
+**/processed/
+**/raw_data/
+**/*.h5ad
+**/*.rds
+**/*.tar
+**/*.tar.gz
+**/*.zip
 
-# R 运行时
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+*.egg-info/
+
+# R
 .Rhistory
 .RData
 .Rproj.user/
 *.Rproj
 
-# 缓存
-.uv-cache/
-renv/library/
-
-# 系统
+# 编辑器与系统
+.vscode/
+.idea/
+*.swp
 .DS_Store
 Thumbs.db

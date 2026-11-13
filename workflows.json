@@ -1,0 +1,399 @@
+{
+  "schema_version": "1.0",
+  "manifest_version": 2,
+  "manifest_kind": "workspace_module_registry",
+  "updated": "2026-10-28",
+  "notes": [
+    "mod 注册表：客户端、服务台、runner 三方共读的唯一事实源（SSOT）。",
+    "依赖用产物名表达，不用绝对路径，路径由运行方按项目拼接。",
+    "series 之间默认硬隔离（aims 铁律二）：不同系列不可穿插、不可跨系列取产物；唯一例外是 constraints.allowed_cross_series_bridges 声明的冻结签名桥。",
+    "stage 内 optional=true 的 mod 可自由勾选；跨 stage 只允许按 order 递增的标准序。",
+    "est_minutes / peak_mem_mb 为参考算力节点实测值，用于组合前的成本预估与拦截。",
+    "运行时内存上限由 BIO_MEM_LIMIT_GB 控制：生产默认 7.5GB，单任务最高 8.0GB；constraints.mem_quota_mb=7680 是规划默认值。"
+  ],
+  "constraints": {
+    "max_concurrent_series": 1,
+    "mem_quota_mb": 7680,
+    "disk_fail_free_pct": 20,
+    "ko_gene_required_mods": [
+      "l2_ko_virtual",
+      "l3_ko_spatial"
+    ],
+    "forbidden_cross_series": true,
+    "allowed_cross_series_bridges": [
+      {
+        "id": "l2_to_l3_celltype_signature",
+        "from": "line2_scrna",
+        "to": "line3_spatial",
+        "scope": "same_project",
+        "producers": [
+          "l2_export_celltype_signature"
+        ],
+        "consumers": [
+          "l3_branches_celltype"
+        ],
+        "path": "public_references/celltype_signatures/<project_id>/signatures.tsv",
+        "manifest": "public_references/celltype_signatures/<project_id>/bridge_manifest.json",
+        "requires": [
+          "sha256",
+          "species_mapping",
+          "seed",
+          "project_id",
+          "value_domain",
+          "gene_symbol_namespace"
+        ]
+      }
+    ]
+  },
+  "series": [
+    {
+      "id": "line1_bulk",
+      "name": "GEO Bulk 常规挖掘",
+      "data_form": "bulk 表达矩阵（series matrix + GPL 平台注释）",
+      "language_profile": "R 步骤 1-4 + Python 步骤 5-8 + R 步骤 9（线内受控桥接 1 次）",
+      "seed": 20261013,
+      "stages": [
+        {
+          "id": "ingest",
+          "name": "数据接入",
+          "order": 1,
+          "required": true,
+          "mods": [
+            {
+              "id": "l1_ingest_prep",
+              "name": "矩阵装配与注释",
+              "desc": "把 GEO 表达矩阵与平台注释装配为带基因符号和分组信息的矩阵",
+              "tool": "GEOquery, Biobase",
+              "language": "R",
+              "requires": [
+                "series_matrix",
+                "gpl",
+                "grouping.txt"
+              ],
+              "produces": [
+                "expr_genes.tsv",
+                "group_map.tsv",
+                "prep_report.txt"
+              ],
+              "est_minutes": 3,
+              "peak_mem_mb": 1200,
+              "notes": "多探针同基因取中位数，剔无 Symbol 探针；分组表已并入本步。",
+              "script": "prep_matrix"
+            }
+          ]
+        },
+        {
+          "id": "qc",
+          "name": "质控与探索",
+          "order": 2,
+          "required": true,
+          "mods": [
+            {
+              "id": "l1_qc_matrix",
+              "name": "样本 QC",
+              "desc": "统计样本检出基因数与组内相关性，识别并标注可能离群的样本",
+              "tool": "limma, ggplot2",
+              "language": "R",
+              "requires": [
+                "expr_genes.tsv",
+                "group_map.tsv"
+              ],
+              "produces": [
+                "qc_report.txt",
+                "sample_qc.tsv"
+              ],
+              "est_minutes": 2,
+              "peak_mem_mb": 1000,
+              "script": "qc_matrix"
+            },
+            {
+              "id": "l1_qc_pca",
+              "name": "PCA 分组验证",
+              "desc": "用主成分分析检查分组结构，并以样本相关性热图辅助识别异常样本",
+              "tool": "limma, ggplot2",
+              "language": "R",
+              "requires": [
+                "expr_genes.tsv",
+                "group_map.tsv"
+              ],
+              "produces": [
+                "pca_scores.tsv",
+                "pca_report.txt"
+              ],
+              "est_minutes": 2,
+              "peak_mem_mb": 1000,
+              "script": "pca_matrix"
+            }
+          ]
+        },
+        {
+          "id": "de",
+          "name": "差异与共表达",
+          "order": 3,
+          "required": true,
+          "mods": [
+            {
+              "id": "l1_de_limma",
+              "name": "差异表达（limma）",
+              "desc": "用 limma 比较两组表达差异，并输出火山图和 MA 图供结果判读",
+              "tool": "limma",
+              "language": "R",
+              "requires": [
+                "expr_genes.tsv",
+                "group_map.tsv"
+              ],
+              "produces": [
+                "deg_all.tsv",
+                "deg_sig.tsv",
+                "deg_report.txt"
+              ],
+              "est_minutes": 4,
+              "peak_mem_mb": 1500,
+              "notes": "8v8 小样本 0 显著基因是真实结果，阈值不随结果调整。",
+              "script": "deg_limma"
+            },
+            {
+              "id": "l1_de_wgcna",
+              "name": "WGCNA 共表达模块",
+              "desc": "基于高变基因构建共表达网络，划分模块并计算模块与表型的相关性",
+              "tool": "WGCNA",
+              "language": "R",
+              "requires": [
+                "expr_genes.tsv",
+                "group_map.tsv"
+              ],
+              "produces": [
+                "wgcna_modules.tsv",
+                "wgcna_module_trait.tsv",
+                "wgcna_hub_genes.tsv"
+              ],
+              "est_minutes": 12,
+              "peak_mem_mb": 2500,
+              "notes": "取方差前 5000 基因，nThreads 锁 3。",
+              "script": "wgcna_modules"
+            }
+          ]
+        },
+        {
+          "id": "enrich",
+          "name": "功能富集与网络",
+          "order": 4,
+          "required": false,
+          "mods": [
+            {
+              "id": "l1_enrich_bulk",
+              "name": "GO/KEGG 富集",
+              "desc": "对差异基因和共表达模块执行 GO、KEGG 富集，输出通路与功能条目",
+              "tool": "clusterProfiler",
+              "language": "R",
+              "requires": [
+                "deg_all.tsv",
+                "wgcna_modules.tsv"
+              ],
+              "produces": [
+                "enrichment_gsea_go.tsv",
+                "enrichment_kegg.tsv"
+              ],
+              "est_minutes": 6,
+              "peak_mem_mb": 1800,
+              "script": "enrichment_bulk"
+            },
+            {
+              "id": "l1_enrich_figures",
+              "name": "富集图件",
+              "desc": "把富集分析结果整理为条形图等图件，突出主要功能条目与显著性",
+              "tool": "matplotlib",
+              "language": "R",
+              "requires": [
+                "enrichment_gsea_go.tsv",
+                "enrichment_kegg.tsv"
+              ],
+              "produces": [
+                "l1_13_gsea_top.png",
+                "l1_14_module_ora_top.png",
+                "figures_manifest.txt"
+              ],
+              "est_minutes": 2,
+              "peak_mem_mb": 1200,
+              "outputs_dir": "figures",
+              "script": "enrichment_figures"
+            },
+            {
+              "id": "l1_enrich_ppi",
+              "name": "离线 PPI 与 Hub 初筛",
+              "desc": "基于 STRING 互作关系构建蛋白网络，并按连接度初筛核心 Hub 基因",
+              "tool": "STRING API",
+              "language": "R",
+              "requires": [
+                "wgcna_modules.tsv",
+                "wgcna_module_trait.tsv"
+              ],
+              "produces": [
+                "ppi_edges.tsv",
+                "ppi_hubs.tsv"
+              ],
+              "est_minutes": 5,
+              "peak_mem_mb": 2000,
+              "notes": "读 public_references/stringdb 离线表，不依赖外网。",
+              "script": "ppi_string"
+            }
+          ]
+        },
+        {
+          "id": "ml",
+          "name": "机器学习与验证",
+          "order": 5,
+          "required": false,
+          "mods": [
+            {
+              "id": "l1_ml_keygenes",
+              "name": "核心基因交集",
+              "desc": "取差异基因、共表达模块和 PPI Hub 的交集，形成候选关键基因清单",
+              "tool": "pandas",
+              "language": "R",
+              "requires": [
+                "deg_all.tsv",
+                "wgcna_modules.tsv",
+                "wgcna_module_trait.tsv",
+                "wgcna_hub_genes.tsv",
+                "ppi_hubs.tsv"
+              ],
+              "produces": [
+                "key_genes.tsv"
+              ],
+              "est_minutes": 2,
+              "peak_mem_mb": 1200,
+              "script": "key_genes"
+            },
+            {
+              "id": "l1_ml_model",
+              "name": "LASSO/RFE 建模",
+              "desc": "用逻辑回归和随机森林建立分类模型，以留一交叉验证评估判别性能",
+              "tool": "sklearn",
+              "language": "R+Python",
+              "requires": [
+                "expr_genes.tsv",
+                "group_map.tsv",
+                "key_genes.tsv",
+                "deg_all.tsv"
+              ],
+              "produces": [
+                "ml_report.txt",
+                "ml_roc.png"
+              ],
+              "est_minutes": 15,
+              "peak_mem_mb": 2800,
+              "bridge": true,
+              "notes": "跨语言前必过 bridge_guard.sh 四项断言。",
+              "script": "ml_model"
+            },
+            {
+              "id": "l1_ml_hub",
+              "name": "Hub 共表达与重要性",
+              "desc": "用 LASSO、RFE 和模型重要性筛选 Hub 基因，并输出 SHAP 解释结果",
+              "tool": "glmnet, sklearn, shap, networkx",
+              "language": "Python",
+              "requires": [
+                "expr_genes.tsv",
+                "group_map.tsv",
+                "key_genes.tsv",
+                "deg_all.tsv"
+              ],
+              "produces": [
+                "ml_core_hub_genes.tsv"
+              ],
+              "est_minutes": 8,
+              "peak_mem_mb": 2200,
+              "script": "ml_hub_analysis"
+            },
+            {
+              "id": "l1_ml_diag",
+              "name": "诊断校准与决策曲线",
+              "desc": "补充模型校准、DCA 决策曲线、预测概率分布和单基因 ROC 对比，检查分类结果稳健性",
+              "tool": "sklearn, scipy",
+              "language": "Python",
+              "requires": [
+                "expr_genes.tsv",
+                "group_map.tsv",
+                "ml_core_hub_genes.tsv"
+              ],
+              "produces": [
+                "ml_diagnostics_report.txt",
+                "ml_shap.png"
+              ],
+              "est_minutes": 10,
+              "peak_mem_mb": 2400,
+              "script": "ml_diagnostics"
+            },
+            {
+              "id": "l1_ml_external",
+              "name": "外部集冻结验证",
+              "desc": "用冻结模型评估内部留出近似；有独立 GEO 队列时再执行真正的外部验证",
+              "tool": "sklearn",
+              "language": "Python",
+              "requires": [
+                "expr_genes.tsv",
+                "group_map.tsv",
+                "key_genes.tsv"
+              ],
+              "produces": [
+                "external_validation_preds.tsv",
+                "external_validation_report.txt"
+              ],
+              "est_minutes": 6,
+              "peak_mem_mb": 1800,
+              "notes": "铁律：只加载训练集冻结系数预测，严禁重训、泄漏或重新筛基因。无独立验证集时走 internal_holdout_approximation；cwd 或 --input 提供 external_frozen_model.tsv，且 cwd 有 val_expr_genes.tsv + val_group_map.tsv 时走 external_cohort_frozen，只 predict。external_frozen_model.tsv 与 val_* 为可选输入，不作所有项目硬性必需。",
+              "script": "external_validation"
+            },
+            {
+              "id": "l1_ml_cox",
+              "name": "Cox 回归",
+              "desc": "对有生存数据的样本拟合 Cox 模型，评估候选基因与生存风险的关系",
+              "tool": "survival, glmnet",
+              "language": "R",
+              "requires": [
+                "expr_genes.tsv",
+                "group_map.tsv",
+                "key_genes.tsv"
+              ],
+              "produces": [
+                "cox_report.txt"
+              ],
+              "est_minutes": 3,
+              "peak_mem_mb": 1400,
+              "optional": true,
+              "notes": "需样本级生存数据；缺数据时自动跳过。",
+              "script": "cox_analysis"
+            }
+          ]
+        },
+        {
+          "id": "figures",
+          "name": "图件汇总",
+          "order": 6,
+          "required": false,
+          "mods": [
+            {
+              "id": "l1_figures_bulk",
+              "name": "线 1 图件包",
+              "desc": "汇总 Bulk 分析结果，统一生成相关性、降维、差异和质控图件",
+              "tool": "matplotlib",
+              "language": "R",
+              "requires": [
+                "processed"
+              ],
+              "produces": [
+                "l1_01_sample_corr.png",
+                "figures_manifest.txt"
+              ],
+              "est_minutes": 4,
+              "peak_mem_mb": 1600,
+              "outputs_dir": "figures",
+              "script": "bulk_figures"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
